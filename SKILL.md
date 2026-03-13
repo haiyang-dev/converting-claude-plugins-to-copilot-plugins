@@ -20,7 +20,7 @@ Use the standard Copilot plugin layout with `plugin.json` at the target root. Co
 Use this skill when:
 
 - A user gives you a Claude Code plugin folder and wants a GitHub Copilot CLI plugin as output.
-- The source plugin uses `.claude-plugin/plugin.json` and root-level component directories such as `skills/`, `agents/`, or `hooks/`.
+- The source plugin uses Claude plugin conventions such as an optional `.claude-plugin/plugin.json`, an optional `.claude-plugin/marketplace.json`, and root-level component directories such as `skills/`, `agents/`, or `hooks/`.
 - Path handling is the risky part: manifest locations, marketplace files, mixed separators, relative references, or Windows path normalization.
 - The user wants the final output in a sibling directory named `<source>-copilot`.
 
@@ -35,7 +35,7 @@ Do not use this skill when:
 1. Ask the user for the Claude Code plugin root folder.
 2. Normalize the source path and derive the sibling `-copilot` output path.
 3. Validate the Claude plugin structure before writing anything.
-4. Create a Copilot plugin root with a root-level `plugin.json` manifest.
+4. Create a Copilot plugin root with a root-level `plugin.json` manifest, translating source metadata when present and deriving only the minimum required metadata when it is not.
 5. Copy and translate plugin components using the official Copilot plugin file locations.
 6. Rewrite path-sensitive references conservatively.
 7. Generate a conversion report that lists copied, translated, skipped, and ambiguous items.
@@ -63,7 +63,9 @@ my-plugin/
 └── settings.json
 ```
 
-The `.claude-plugin/` directory contains metadata such as `plugin.json` and, optionally, `marketplace.json`. Component directories such as `skills/`, `agents/`, `commands/`, and `hooks/` still belong at the plugin root.
+The `.claude-plugin/` directory contains metadata such as an optional `plugin.json` and, optionally, `marketplace.json`. Component directories such as `skills/`, `agents/`, `commands/`, and `hooks/` still belong at the plugin root.
+
+Do not require the Claude manifest as the sole indicator that the source is a Claude plugin. A source tree can still be a valid Claude-style plugin package if it lacks `.claude-plugin/plugin.json` but contains recognizable plugin components in the documented root locations.
 
 ## GitHub Copilot Plugin Structure
 
@@ -177,9 +179,10 @@ Fail immediately if any of these are true:
 
 - `SOURCE_ROOT` does not exist.
 - `SOURCE_ROOT` is not a directory.
-- `SOURCE_ROOT/.claude-plugin/plugin.json` does not exist.
 - `TARGET_ROOT` already exists.
 - Any resolved source or target path escapes its root after normalization.
+
+Treat the source as invalid only if it has neither a Claude manifest nor any recognizable Claude plugin components in documented locations such as `skills/`, `agents/`, `commands/`, `hooks/hooks.json`, `.mcp.json`, `.lsp.json`, or `.claude-plugin/marketplace.json`.
 
 If `skills/` exists, every skill directory under it must contain `SKILL.md`.
 
@@ -202,6 +205,7 @@ Use these target translations as the Copilot output contract for version 1:
 | `.mcp.json` | `.mcp.json` |
 | `.lsp.json` | `lsp.json` |
 | `settings.json` | unsupported by default; report and skip unless you have a documented Copilot equivalent |
+| `outputStyles` manifest field or related assets | unsupported by default; report and skip unless the target Copilot docs explicitly document an equivalent |
 
 For other top-level files and directories:
 
@@ -211,7 +215,13 @@ For other top-level files and directories:
 
 ### Manifest Translation
 
-Translate the Claude manifest into a Copilot `plugin.json` at the target root.
+If `.claude-plugin/plugin.json` exists, translate the Claude manifest into a Copilot `plugin.json` at the target root.
+
+If the source has no Claude manifest, still emit a Copilot `plugin.json` because it is the standard Copilot plugin entry point. In that case:
+
+- derive `name` conservatively from the source directory name if no better documented source exists
+- copy only metadata you can prove from source files
+- do not invent optional fields
 
 Preserve metadata fields when available and valid:
 
@@ -237,6 +247,8 @@ If the target uses only Copilot default locations, omit these component path fie
 
 Do not copy the Claude manifest location itself. The Copilot manifest belongs at the target root.
 
+Do not copy Claude-only manifest fields such as `outputStyles` unless the target Copilot documentation explicitly documents an equivalent field.
+
 ## Claude Marketplace Semantics
 
 When reading a source marketplace:
@@ -260,7 +272,7 @@ When translating marketplace entries:
 - Preserve `name` and `owner`.
 - Preserve `metadata.description` and `metadata.version` when present.
 - Preserve `metadata.pluginRoot` only if it still matches the translated repository layout.
-- Preserve plugin entry metadata such as `description`, `version`, `author`, `homepage`, `repository`, `license`, `keywords`, `category`, `tags`, and `strict` when valid.
+- Preserve plugin entry metadata such as `description`, `version`, `author`, `homepage`, `repository`, `license`, `keywords`, `category`, and `tags` when valid.
 - Preserve plugin entry component override fields only when they still point to valid Copilot plugin content.
 
 Rewrite each plugin entry `source` so it remains correct for Copilot marketplace semantics:
@@ -273,7 +285,11 @@ Rewrite each plugin entry `source` so it remains correct for Copilot marketplace
 
 If the source marketplace file depends on Claude-only semantics you cannot map safely, preserve the entry and flag it in the conversion report.
 
-If the source marketplace relies on `strict: false`, preserve it only when the translated marketplace entry is intentionally acting as the authority for component definitions. Otherwise keep the default strict behavior and let the translated `plugin.json` remain authoritative.
+Do not map Claude `strict` semantics directly to Copilot `strict`. In Claude marketplace docs, `strict: false` changes whether the marketplace entry or `plugin.json` is authoritative for component definitions. In the referenced Copilot docs, `strict` controls validation strictness instead. Because the field name matches but the semantics do not, use these rules:
+
+- do not preserve Claude `strict: false` just because it appeared in the source marketplace
+- keep Copilot's default strict behavior unless you have a documented Copilot-specific reason to emit `strict: false`
+- if the Claude marketplace depended on `strict: false` authority semantics, report that semantic mismatch explicitly in the conversion report
 
 ## Rewrite Rules
 
@@ -311,6 +327,8 @@ If a relative reference escapes the source plugin tree, preserve the text and ad
 
 If a manifest field or command has no documented Copilot equivalent, preserve the original text and report it.
 
+If copied docs or examples rely on Claude plugin namespacing such as `/plugin-name:skill`, do not invent a Copilot command or invocation form unless the target interaction is documented and provable. Preserve and report ambiguous examples.
+
 If a path-like string could be either prose or a real path, preserve it and warn.
 
 ## Unsupported Or Conditional Items
@@ -318,12 +336,14 @@ If a path-like string could be either prose or a real path, preserve it and warn
 Copilot CLI plugins support agents, skills, hooks, MCP, LSP, and commands, but not every Claude plugin file maps one-to-one.
 
 - Convert `skills/`, `agents/`, `commands/`, hooks config, `.mcp.json`, and `.lsp.json` when present
-- Translate `.claude-plugin/plugin.json` into root `plugin.json`
+- Translate `.claude-plugin/plugin.json` into root `plugin.json` when present, or derive a minimal root `plugin.json` when the source uses only default Claude component locations
 - Translate `.claude-plugin/marketplace.json` into `.github/plugin/marketplace.json` when present
 - Generate `.github/plugin/marketplace.json` only when explicitly requested and absent from the source
 - Keep marketplace `source` entries repository-root-relative and avoid `..`
 - Rewrite Claude script-path environment variables to concrete target paths only when the target file location is provable; otherwise preserve and report
 - Report `settings.json` as unsupported unless the destination behavior is explicitly documented
+- Report Claude-only hook types such as `http`, `prompt`, and `agent`, and Claude-only hook events without documented Copilot equivalents, unless you can safely reduce them to supported Copilot command-hook behavior
+- Report Claude marketplace `strict` authority semantics and Claude manifest `outputStyles` as unsupported semantic mismatches unless the target Copilot docs explicitly document an equivalent
 
 ## Conversion Report
 
@@ -343,13 +363,15 @@ The report should include:
 ## Common Failure Modes
 
 - Treating Claude root components as if they lived inside `.claude-plugin/`
+- Rejecting a valid Claude plugin package only because `.claude-plugin/plugin.json` is absent
 - Converting to `.github/skills/` when the user asked for a Copilot plugin
 - Leaving the Copilot manifest in `.claude-plugin/` instead of the target root
 - Forgetting to rename `.lsp.json` to `lsp.json`
 - Adding custom manifest component paths even though the target uses default Copilot locations
 - Rewriting marketplace `source` paths relative to the wrong root
 - Treating the marketplace file as mandatory for every plugin instead of optional distribution metadata
-- Dropping `strict` or component override fields from marketplace entries without checking whether the marketplace is meant to be authoritative
+- Treating Claude `strict` as if it had the same meaning in Copilot marketplace entries
+- Silently dropping Claude-only fields such as `settings.json` or `outputStyles` instead of reporting them
 - Rewriting text that is not actually a path
 - Following `..` segments or symlinks outside the allowed root
 
@@ -363,7 +385,7 @@ Build a real Copilot plugin directory. Put `plugin.json` at the target root. Omi
 
 - Customization overview: `https://docs.github.com/api/article/body?pathname=/en/copilot/how-tos/copilot-cli/customize-copilot/overview`
 - Plugin reference: `https://docs.github.com/api/article/body?pathname=/en/copilot/reference/copilot-cli-reference/cli-plugin-reference`
-- Hooks configuration: `https://docs.github.com/api/article/body?pathname=/en/copilot/reference/hooks-configuration`
+- Hooks configuration: `https://docs.github.com/api/article/body?pathname=/en/copilot/reference/hooks-configuration` and `https://docs.github.com/api/article/body?pathname=/en/copilot/how-tos/use-copilot-agents/coding-agent/use-hooks`
 
 ### GitHub Copilot Marketplace
 
